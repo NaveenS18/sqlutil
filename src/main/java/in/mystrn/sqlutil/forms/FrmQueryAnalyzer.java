@@ -9,6 +9,7 @@ import java.awt.GridBagLayout;
 import java.awt.Insets;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.KeyEvent; // For Key Binding
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -22,9 +23,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Vector;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
+import javax.swing.AbstractAction;
+import javax.swing.Action;
+import javax.swing.ActionMap;
 import javax.swing.BorderFactory;
+import javax.swing.InputMap;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -36,30 +43,30 @@ import javax.swing.JTable;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JToolBar;
+import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.table.DefaultTableModel;
 
 // --- Imports ---
-import com.formdev.flatlaf.FlatIntelliJLaf;
+import com.formdev.flatlaf.FlatIntelliJLaf; // Or your chosen FlatLaf theme
 
 import gudusoft.gsqlparser.EDbVendor;
 import gudusoft.gsqlparser.TGSqlParser;
-import gudusoft.gsqlparser.TSourceToken;
-// Using wildcard for brevity
-import gudusoft.gsqlparser.nodes.TParseTreeNode;
-import gudusoft.gsqlparser.stmt.TDeleteSqlStatement;
-import gudusoft.gsqlparser.stmt.TInsertSqlStatement;
-import gudusoft.gsqlparser.stmt.TSelectSqlStatement;
-import gudusoft.gsqlparser.stmt.TUpdateSqlStatement;
+import gudusoft.gsqlparser.TSourceToken; // Needed for extracting SQL substring
+import gudusoft.gsqlparser.nodes.TParseTreeNode; // Needed for statement iteration
+import gudusoft.gsqlparser.stmt.TDeleteSqlStatement; // Needed for EXPLAIN check
+import gudusoft.gsqlparser.stmt.TInsertSqlStatement; // Needed for EXPLAIN check
+import gudusoft.gsqlparser.stmt.TSelectSqlStatement; // Needed for EXPLAIN check & alias map
+import gudusoft.gsqlparser.stmt.TUpdateSqlStatement; // Needed for EXPLAIN check
 import in.mystrn.sqlutil.utils.ErrorDialog;
 import in.mystrn.sqlutil.utils.ProcessingDialog;
 import in.mystrn.sqlutil.utils.ProcessingTask;
-import in.mystrn.sqlutil.utils.QueryAnalyzerUtil;
+import in.mystrn.sqlutil.utils.QueryAnalyzerUtil; // Your Gudu Util
 
 /**
  * SQL Query Analyzer GUI using Gudu SQL Parser for structural analysis
- * and JDBC for EXPLAIN plan, with FlatLaf UI and enhanced fonts.
+ * and JDBC for EXPLAIN plan, with FlatLaf UI, custom fonts, and Enter key binding.
  *
  * @author hive
  */
@@ -78,10 +85,10 @@ public class FrmQueryAnalyzer extends JFrame {
     private JButton analyzeButton;
 
     // --- Font Definition ---
-    // Using a Google Font (Roboto Mono). Assumes this font is installed on the system.
-    // If not installed, Java will fall back to a default monospaced font.
-    private static final Font MONOSPACED_FONT = new Font("Roboto Mono", Font.PLAIN, 13); // Or "Source Code Pro", "Fira Code" etc.
+    // Using a Google Font (Roboto Mono). Assumes font is installed.
+    private static final Font MONOSPACED_FONT = new Font("Roboto Mono", Font.PLAIN, 13);
 
+    // --- Gudu Query Analyzer Utility Instance ---
     private final QueryAnalyzerUtil queryAnalyzerUtil;
 
     public FrmQueryAnalyzer() {
@@ -91,12 +98,14 @@ public class FrmQueryAnalyzer extends JFrame {
         setLocationRelativeTo(null);
 
         queryAnalyzerUtil = new QueryAnalyzerUtil();
+        // Default vendor can be set here if desired, otherwise detected from URL
+        // queryAnalyzerUtil.vendor = EDbVendor.dbvmysql;
 
         initComponents();
     }
 
     /**
-     * Initialize and lay out all the Swing components. Applies custom font.
+     * Initialize and lay out all the Swing components. Applies custom font and Key Binding.
      */
     private void initComponents() {
         setLayout(new BorderLayout());
@@ -104,6 +113,22 @@ public class FrmQueryAnalyzer extends JFrame {
 
         queryInputArea = new JTextArea();
         queryInputArea.setFont(MONOSPACED_FONT); // Apply font
+
+        // --- Add Key Binding for Enter key ---
+        InputMap inputMap = queryInputArea.getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap actionMap = queryInputArea.getActionMap();
+        KeyStroke enterKey = KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0);
+        String actionName = "analyzeOnEnter";
+        inputMap.put(enterKey, actionName);
+        Action analyzeAction = new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                analyzeButton.doClick(); // Simulate button click
+            }
+        };
+        actionMap.put(actionName, analyzeAction);
+        // --- END Key Binding ---
+
         JScrollPane queryScrollPane = new JScrollPane(queryInputArea);
         queryScrollPane.setBorder(BorderFactory.createTitledBorder("SQL Query"));
 
@@ -142,6 +167,7 @@ public class FrmQueryAnalyzer extends JFrame {
         add(topPanel, BorderLayout.NORTH);
         add(mainSplitPane, BorderLayout.CENTER);
 
+        // --- Action Listener with Integrated Logic ---
         analyzeButton.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -161,8 +187,8 @@ public class FrmQueryAnalyzer extends JFrame {
                     @Override
                     public void run(Consumer<String> messageUpdater) throws Exception {
                         Connection connection = null;
-                        TSelectSqlStatement explainableSelectStatement = null;
-                        String selectStatementSql = null;
+                        TSelectSqlStatement explainableSelectStatement = null; // Node for SELECT
+                        String explainableStatementSql = null; // SQL text for EXPLAIN
 
                         try {
                             messageUpdater.accept("Determining database vendor...");
@@ -173,52 +199,54 @@ public class FrmQueryAnalyzer extends JFrame {
                             queryAnalyzerUtil.vendor = detectedVendor;
                             messageUpdater.accept("Vendor detected: " + detectedVendor.name());
 
-                            messageUpdater.accept("Performing structural analysis...");
+                            messageUpdater.accept("Parsing SQL script...");
                             TGSqlParser parser = new TGSqlParser(detectedVendor);
                             parser.sqltext = sqlQuery;
                             if (parser.parse() != 0) {
-                                 queryAnalyzerUtil.isValidSQL(sqlQuery);
+                                 queryAnalyzerUtil.isValidSQL(sqlQuery); // Populate error field
                                  throw new Exception("SQL parsing failed:\n" + queryAnalyzerUtil.error);
                             }
 
-                            // Find the first SELECT/INSERT/UPDATE/DELETE statement to EXPLAIN
+                            // Find the first explainable statement (SELECT/INSERT/UPDATE/DELETE)
                             for (int i = 0; i < parser.sqlstatements.size(); i++) {
                                 TParseTreeNode stmtNode = parser.sqlstatements.get(i);
                                 if (stmtNode instanceof TSelectSqlStatement || stmtNode instanceof TInsertSqlStatement
                                     || stmtNode instanceof TUpdateSqlStatement || stmtNode instanceof TDeleteSqlStatement)
                                 {
-                                    // Extract SQL text for the explainable statement
                                     TSourceToken startToken = stmtNode.getStartToken();
                                     TSourceToken endToken = stmtNode.getEndToken();
-                                    selectStatementSql = sqlQuery.substring(
-                                            (int) startToken.offset,
-                                            (int) (endToken.offset + endToken.astext.length())
-                                    ).trim();
-
-                                    // Store the specific node if it's a SELECT for alias mapping later
-                                    if (stmtNode instanceof TSelectSqlStatement) {
-                                         explainableSelectStatement = (TSelectSqlStatement) stmtNode;
+                                    // Ensure tokens are valid before substring
+                                    if (startToken != null && endToken != null) {
+                                        explainableStatementSql = sqlQuery.substring(
+                                                (int) startToken.offset,
+                                                (int) (endToken.offset + endToken.astext.length())
+                                        ).trim();
+                                        if (stmtNode instanceof TSelectSqlStatement) {
+                                             explainableSelectStatement = (TSelectSqlStatement) stmtNode;
+                                        }
+                                        break; // Found the first one
                                     }
-                                    break;
                                 }
                             }
 
+                            messageUpdater.accept("Performing structural analysis...");
+                            // Run analysis on the potentially multi-statement script
                             Map<String, Object> analysisResult = queryAnalyzerUtil.analyzeQueryStructure(sqlQuery);
 
                             SwingUtilities.invokeLater(() -> updateAnalysisDisplay(analysisResult));
-                            if (!Boolean.TRUE.equals(analysisResult.get("isValid"))) return;
+                            if (!Boolean.TRUE.equals(analysisResult.get("isValid"))) return; // Stop if parsing failed
 
-                            if (selectStatementSql == null) {
+                            if (explainableStatementSql == null) {
                                 messageUpdater.accept("No explainable (SELECT/INSERT/UPDATE/DELETE) statement found in script.");
                                 SwingUtilities.invokeLater(() -> explainTable.setModel(new DefaultTableModel()));
-                                return;
+                                return; // Nothing to EXPLAIN
                             }
 
                             messageUpdater.accept("Connecting to database...");
                             connection = getConnection();
 
                             messageUpdater.accept("Executing EXPLAIN command...");
-                            String explainQuery = "EXPLAIN " + selectStatementSql;
+                            String explainQuery = "EXPLAIN " + explainableStatementSql;
                             DefaultTableModel explainTableModel;
                             Map<String, String> aliasToTableMapForExplain = new HashMap<>();
 
@@ -230,7 +258,6 @@ public class FrmQueryAnalyzer extends JFrame {
                                 if (explainableSelectStatement != null) {
                                     aliasToTableMapForExplain.putAll(queryAnalyzerUtil.buildAliasMap(explainableSelectStatement));
                                 }
-                                // Note: Alias map might be less relevant for single-table INSERT/UPDATE/DELETE EXPLAIN
 
                             } catch (SQLException explainEx) {
                                 if (explainEx.getMessage().toLowerCase().contains("unknown column") || explainEx.getMessage().toLowerCase().contains("unknown variable")) {
@@ -241,9 +268,12 @@ public class FrmQueryAnalyzer extends JFrame {
                             }
 
                             final Map<String, String> finalAliasMap = aliasToTableMapForExplain;
+                            // Ensure analysisResult is accessible in EDT lambda
+                            final Map<String, Map<String, Object>> finalTableInfo = (Map<String, Map<String, Object>>) analysisResult.get("tableInfo");
+
                             SwingUtilities.invokeLater(() -> {
                                 explainTable.setModel(explainTableModel);
-                                performMicroAnalysis(explainTableModel, resultsTabbedPane, finalAliasMap, (Map<String, Map<String, Object>>) analysisResult.get("tableInfo"));
+                                performMicroAnalysis(explainTableModel, resultsTabbedPane, finalAliasMap, finalTableInfo);
                             });
 
                             messageUpdater.accept("Analysis complete.");
@@ -262,32 +292,53 @@ public class FrmQueryAnalyzer extends JFrame {
     /**
      * Creates the panel for JDBC connection inputs. (Unchanged)
      */
+    /**
+     * Creates the panel for JDBC connection inputs.
+     * --- UPDATED to add Enter key focus traversal ---
+     */
     private JPanel createConnectionPanel() {
         JPanel panel = new JPanel(new GridBagLayout());
         panel.setBorder(BorderFactory.createTitledBorder("Database Connection"));
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.insets = new Insets(2, 5, 2, 5);
         gbc.fill = GridBagConstraints.HORIZONTAL;
+
+        // Row 0: JDBC Driver
         gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0;
         panel.add(new JLabel("Driver Class:"), gbc);
         gbc.gridx = 1; gbc.weightx = 1.0;
         jdbcDriverField = new JTextField("com.mysql.cj.jdbc.Driver", 30);
         panel.add(jdbcDriverField, gbc);
+        // --- ADD Action Listener for Driver Field ---
+        jdbcDriverField.addActionListener(e -> jdbcUrlField.requestFocusInWindow()); // Move focus to URL field on Enter
+
+        // Row 0: Username
         gbc.gridx = 2; gbc.weightx = 0;
         panel.add(new JLabel("Username:"), gbc);
         gbc.gridx = 3; gbc.weightx = 0.5;
         usernameField = new JTextField("root", 15);
         panel.add(usernameField, gbc);
+        // --- ADD Action Listener for Username Field ---
+        usernameField.addActionListener(e -> passwordField.requestFocusInWindow()); // Move focus to Password field on Enter
+
+        // Row 1: JDBC URL
         gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0;
         panel.add(new JLabel("JDBC URL:"), gbc);
         gbc.gridx = 1; gbc.weightx = 1.0;
         jdbcUrlField = new JTextField("jdbc:mysql://localhost:3306/your_database_name", 30);
         panel.add(jdbcUrlField, gbc);
+        // --- ADD Action Listener for URL Field ---
+        jdbcUrlField.addActionListener(e -> usernameField.requestFocusInWindow()); // Move focus to Username field on Enter
+
+        // Row 1: Password
         gbc.gridx = 2; gbc.weightx = 0;
         panel.add(new JLabel("Password:"), gbc);
         gbc.gridx = 3; gbc.weightx = 0.5;
         passwordField = new JPasswordField(15);
         panel.add(passwordField, gbc);
+        // --- ADD Action Listener for Password Field ---
+        passwordField.addActionListener(e -> queryInputArea.requestFocusInWindow()); // Move focus to Query Area on Enter
+
         return panel;
     }
 
@@ -323,7 +374,8 @@ public class FrmQueryAnalyzer extends JFrame {
     }
 
     /**
-     * Updates the main analysis text area and table tabs based on Gudu analysis results. (Unchanged)
+     * Updates the main analysis text area and table tabs based on Gudu analysis results.
+     * Should be called on the EDT.
      */
     private void updateAnalysisDisplay(Map<String, Object> analysisResult) {
         clearTableTabs();
@@ -331,8 +383,10 @@ public class FrmQueryAnalyzer extends JFrame {
         analysisTextArea.setText("");
 
         if (!Boolean.TRUE.equals(analysisResult.get("isValid"))) {
-            analysisTextArea.setText("--- SQL Parse Error ---\n" + analysisResult.get("error"));
-            ErrorDialog.showError(this, "SQL Parsing Error:\n" + analysisResult.get("error"));
+            String errorMsg = "--- SQL Parse Error ---\n" + analysisResult.get("error");
+            analysisTextArea.setText(errorMsg);
+            // Optionally show ErrorDialog, but text area already shows it.
+            // ErrorDialog.showError(this, "SQL Parsing Error:\n" + analysisResult.get("error"));
             return;
         }
 
@@ -341,22 +395,35 @@ public class FrmQueryAnalyzer extends JFrame {
         sb.append("Statement Type: ").append(analysisResult.get("statementType")).append("\n");
 
         Map<String, Object> queryStats = (Map<String, Object>) analysisResult.get("queryStats");
-        if (queryStats != null) {
+        if (queryStats != null && !queryStats.isEmpty()) {
             sb.append("\n--- Query Statistics ---\n");
             queryStats.forEach((key, value) -> sb.append(key).append(": ").append(value).append("\n"));
+        } else {
+             sb.append("\n--- Query Statistics ---\n(No specific stats gathered for this statement type)\n");
         }
 
-        List<QueryAnalyzerUtil.PerformanceHint> hints = (List<QueryAnalyzerUtil.PerformanceHint>) analysisResult.get("performanceHints");
-        if (hints != null && !hints.isEmpty()) {
+        // --- UPDATED to handle List<PerformanceHint> ---
+        List<?> hintObjects = (List<?>) analysisResult.get("performanceHints");
+        if (hintObjects != null && !hintObjects.isEmpty()) {
             sb.append("\n--- Performance Hints (Structural) ---\n");
-            hints.forEach(hint -> sb.append(hint.toString()).append("\n\n")); // Added extra newline for readability
+            for(Object hintObj : hintObjects) {
+                if (hintObj instanceof QueryAnalyzerUtil.PerformanceHint) {
+                    // Use the toString() method of PerformanceHint
+                    sb.append(hintObj.toString()).append("\n\n"); // Add extra newline
+                } else {
+                     sb.append("- ").append(hintObj.toString()).append("\n"); // Fallback if not PerformanceHint
+                }
+            }
         }
+        // --- END UPDATE ---
 
         analysisTextArea.setText(sb.toString());
 
         Map<String, Map<String, Object>> tableInfo = (Map<String, Map<String, Object>>) analysisResult.get("tableInfo");
-        if (tableInfo != null) {
+        if (tableInfo != null && !tableInfo.isEmpty()) { // Check not empty
             createTableTabsFromAnalysis(tableInfo);
+        } else {
+             System.out.println("tableInfo is null or empty. No table tabs created.");
         }
     }
 
@@ -369,22 +436,32 @@ public class FrmQueryAnalyzer extends JFrame {
         for (Map.Entry<String, Map<String, Object>> entry : tableInfo.entrySet()) {
             String tableName = entry.getKey();
             Map<String, Object> details = entry.getValue();
+            if (details == null) continue; // Skip if details map is null
+
             Vector<Vector<Object>> data = new Vector<>();
 
-            Set<String> allCols = (Set<String>) details.getOrDefault("allColumnsUsed", Set.of());
-            Set<String> whereCols = (Set<String>) details.getOrDefault("whereColumns", Set.of());
-            Set<String> funcCols = (Set<String>) details.getOrDefault("columnsWithFunctionsInWhere", Set.of());
-            String alias = (String) details.getOrDefault("aliasUsed", "N/A");
+            // Safely get sets, defaulting to empty if null
+            Set<?> allColsSet = (Set<?>) details.getOrDefault("allColumnsUsed", Set.of());
+            Set<?> whereColsSet = (Set<?>) details.getOrDefault("whereColumns", Set.of());
+            Set<?> funcColsSet = (Set<?>) details.getOrDefault("columnsWithFunctionsInWhere", Set.of());
+            String alias = details.getOrDefault("aliasUsed", "N/A").toString();
+
+            // Convert Sets to Strings for display
+            String allCols = allColsSet.isEmpty() ? "(None Detected)" : allColsSet.stream().map(Object::toString).collect(Collectors.joining(", "));
+            String whereCols = whereColsSet.isEmpty() ? "(None)" : whereColsSet.stream().map(Object::toString).collect(Collectors.joining(", "));
+            String funcCols = funcColsSet.isEmpty() ? "(None)" : funcColsSet.stream().map(Object::toString).collect(Collectors.joining(", "));
+
 
             data.add(new Vector<>(List.of("Alias Used", alias)));
-            data.add(new Vector<>(List.of("All Columns Used", allCols.isEmpty() ? "(None Detected)" : String.join(", ", allCols))));
-            data.add(new Vector<>(List.of("WHERE Columns", whereCols.isEmpty() ? "(None)" : String.join(", ", whereCols))));
-            data.add(new Vector<>(List.of("Funcs on WHERE Cols", funcCols.isEmpty() ? "(None)" : String.join(", ", funcCols))));
+            data.add(new Vector<>(List.of("All Columns Used", allCols)));
+            data.add(new Vector<>(List.of("WHERE Columns", whereCols)));
+            data.add(new Vector<>(List.of("Funcs on WHERE Cols", funcCols)));
 
-             if (!funcCols.isEmpty()) {
-                 data.add(0,new Vector<>(List.of("--- WARNING ---", "Function on WHERE column(s): " + String.join(", ", funcCols))));
+             // Add structural warning derived from Gudu analysis
+             if (!funcColsSet.isEmpty()) {
+                 data.add(0,new Vector<>(List.of("--- WARNING ---", "Function on WHERE column(s): " + funcCols)));
                  data.add(1,new Vector<>(List.of("", "May prevent index usage.")));
-                 data.add(2,new Vector<>(List.of("", "")));
+                 data.add(2,new Vector<>(List.of("", ""))); // Spacer
              }
 
             DefaultTableModel statsModel = new DefaultTableModel(data, columnNames);
@@ -414,7 +491,9 @@ public class FrmQueryAnalyzer extends JFrame {
         while (rs.next()) {
             Vector<Object> row = new Vector<>();
             for (int columnIndex = 1; columnIndex <= columnCount; columnIndex++) {
-                row.add(rs.getObject(columnIndex));
+                // Handle potential nulls from DB gracefully
+                Object value = rs.getObject(columnIndex);
+                row.add(value != null ? value : ""); // Add empty string for null
             }
             data.add(row);
         }
@@ -422,7 +501,7 @@ public class FrmQueryAnalyzer extends JFrame {
     }
 
     /**
-     * Performs analysis based on the actual EXPLAIN plan from the database. (Unchanged)
+     * Performs analysis based on the actual EXPLAIN plan from the database. (Unchanged - includes detailed suggestions)
      */
     private void performMicroAnalysis(DefaultTableModel explainModel,
                                       JTabbedPane resultsTabbedPane,
@@ -451,6 +530,7 @@ public class FrmQueryAnalyzer extends JFrame {
                 String currentAlias = getColumnValue(explainModel, i, tableCol, null);
                 String fullTableName = (currentAlias != null && aliasToTableMap != null) ? aliasToTableMap.get(currentAlias.toLowerCase()) : null;
 
+                // Safely get column sets from Gudu info
                 Set<String> filteringCols = Set.of();
                 Set<String> funcColsInWhere = Set.of();
                 if (fullTableName != null && guduTableInfo != null) {
@@ -461,11 +541,10 @@ public class FrmQueryAnalyzer extends JFrame {
                     }
                 }
 
+                // Suggestion 1: Full Table Scan
                 String scanType = getColumnValue(explainModel, i, typeCol, "");
                 if ("ALL".equalsIgnoreCase(scanType)) {
-                    String detail = String.format(
-                            "[%s %s] SEVERE: Full Table Scan ('type' is 'ALL'). ", rowId, currentAlias!=null?currentAlias:""
-                    );
+                    String detail = String.format("[%s %s] SEVERE: Full Table Scan ('type' is 'ALL'). ", rowId, currentAlias!=null?currentAlias:"");
                     String why = "Why: The database read every row. Usually inefficient.";
                     String suggestion = "Suggestion: Create or improve indexes on columns used in JOIN conditions or WHERE clauses for this table.";
                     if (!filteringCols.isEmpty()) {
@@ -474,73 +553,50 @@ public class FrmQueryAnalyzer extends JFrame {
                         suggestion += " Check columns used to JOIN '" + currentAlias + "' to other tables.";
                     }
                     suggestions.append(detail).append(why).append("\n  > ").append(suggestion).append("\n");
-                    if (fullTableName != null) {
-                         addWarningToTableTab(resultsTabbedPane, fullTableName, "Full Table Scan", suggestion);
-                    }
+                    if (fullTableName != null) { addWarningToTableTab(resultsTabbedPane, fullTableName, "Full Table Scan", suggestion); }
                 }
 
+                // Suggestion 2: Index not used
                 String actualKey = getColumnValue(explainModel, i, keyCol, null);
                 String possibleKeys = getColumnValue(explainModel, i, possibleKeysCol, null);
-                if (possibleKeys != null && !possibleKeys.isEmpty() && (actualKey == null || actualKey.isEmpty())) {
+                if (possibleKeys != null && !possibleKeys.isEmpty() && (actualKey == null || actualKey.isEmpty() || "NULL".equalsIgnoreCase(actualKey))) { // Check for "NULL" string too
                      String warning = String.format("Possible keys (%s) found, but none used.", possibleKeys);
                      StringBuilder explanation = new StringBuilder("Potential reasons why index wasn't applied: \n");
                      boolean reasonFound = false;
                      if (!funcColsInWhere.isEmpty()) {
                          Set<String> problematicCols = new HashSet<>(filteringCols);
                          problematicCols.retainAll(funcColsInWhere);
-                         if (!problematicCols.isEmpty()) {
-                             explanation.append("    - Function applied to indexed column(s): [").append(String.join(", ", problematicCols)).append("]. This prevents index use.\n");
-                             reasonFound = true;
-                         }
+                         if (!problematicCols.isEmpty()) { explanation.append("    - Function applied to indexed column(s): [").append(String.join(", ", problematicCols)).append("]. This prevents index use.\n"); reasonFound = true; }
                      }
                      explanation.append("    - Data type mismatch in JOIN or WHERE conditions involving filtering columns");
-                     if (!filteringCols.isEmpty()) {
-                         explanation.append(": [").append(String.join(", ", filteringCols)).append("]");
-                     }
+                     if (!filteringCols.isEmpty()) { explanation.append(": [").append(String.join(", ", filteringCols)).append("]"); }
                      explanation.append(".\n");
                      explanation.append("    - Optimizer estimated scanning rows directly is faster (e.g., small table or low selectivity).\n");
-                     if (!reasonFound && !funcColsInWhere.isEmpty()) {
-                         explanation.append("    - Note: Functions were detected in WHERE, but maybe not on the relevant indexed columns: [").append(String.join(", ", funcColsInWhere)).append("].\n");
-                     }
+                     if (!reasonFound && !funcColsInWhere.isEmpty()) { explanation.append("    - Note: Functions were detected in WHERE, but maybe not on the relevant indexed columns: [").append(String.join(", ", funcColsInWhere)).append("].\n"); }
 
-                     suggestions.append(String.format(
-                             "[%s %s] WARNING: Index potentially available but not used.\n  > %s\n  > %s",
-                             rowId, currentAlias!=null?currentAlias:"", warning, explanation.toString()
-                     ));
+                     suggestions.append(String.format("[%s %s] WARNING: Index potentially available but not used.\n  > %s\n  > %s", rowId, currentAlias!=null?currentAlias:"", warning, explanation.toString()));
                      if (fullTableName != null) {
-                         String tabSuggestion = "Check for functions/type mismatches on filtering columns";
-                          if (!filteringCols.isEmpty()) { tabSuggestion += ": [" + String.join(", ", filteringCols) + "]"; }
-                          if (!funcColsInWhere.isEmpty()) {
-                              Set<String> problematicCols = new HashSet<>(filteringCols);
-                              problematicCols.retainAll(funcColsInWhere);
-                              if (!problematicCols.isEmpty()) { tabSuggestion += " (Func detected on: " + String.join(",", problematicCols)+")"; }
-                          }
-                         addWarningToTableTab(resultsTabbedPane, fullTableName, "Index Not Used", tabSuggestion);
+                         // Pass detailed explanation to tab
+                         addWarningToTableTab(resultsTabbedPane, fullTableName, "Index Not Used", explanation.toString().replace("\n    - ","\n").trim());
                      }
                 }
 
+                // Suggestion 3: Large row scans
                  long rowsScanned = getLongValue(explainModel, i, rowsCol);
                  if (rowsScanned > 10000) {
-                     suggestions.append(String.format(
-                             "[%s %s] INFO: Estimated %d rows scanned.\n"
-                             + "  > SUGGESTION: If slow, ensure WHERE/JOIN clause using indexed columns is selective.\n", rowId, currentAlias!=null?currentAlias:"", rowsScanned));
+                     suggestions.append(String.format("[%s %s] INFO: Estimated %d rows scanned.\n  > SUGGESTION: If slow, ensure WHERE/JOIN clause using indexed columns is selective.\n", rowId, currentAlias!=null?currentAlias:"", rowsScanned));
                  }
+                // Suggestion 4 & 5: Using filesort / temporary
                 String extraInfo = getColumnValue(explainModel, i, extraCol, "");
                 if (extraInfo.contains("Using filesort")) {
                     String suggestion = "Suggestion: Add index covering columns in ORDER BY clause.";
-                    suggestions.append(String.format(
-                            "[%s %s] WARNING: 'Using filesort'.\n  > %s\n", rowId, currentAlias!=null?currentAlias:"", suggestion));
-                     if (fullTableName != null) {
-                         addWarningToTableTab(resultsTabbedPane, fullTableName, "Filesort Used", suggestion);
-                     }
+                    suggestions.append(String.format("[%s %s] WARNING: 'Using filesort'.\n  > %s\n", rowId, currentAlias!=null?currentAlias:"", suggestion));
+                     if (fullTableName != null) { addWarningToTableTab(resultsTabbedPane, fullTableName, "Filesort Used", suggestion); }
                 }
                 if (extraInfo.contains("Using temporary")) {
                      String suggestion = "Suggestion: Temp table needed (slow). Common for complex GROUP BY/UNION/subqueries. Simplify if possible.";
-                    suggestions.append(String.format(
-                            "[%s %s] WARNING: 'Using temporary'.\n  > %s\n", rowId, currentAlias!=null?currentAlias:"", suggestion));
-                    if (fullTableName != null) {
-                        addWarningToTableTab(resultsTabbedPane, fullTableName, "Temporary Table Used", suggestion);
-                    }
+                    suggestions.append(String.format("[%s %s] WARNING: 'Using temporary'.\n  > %s\n", rowId, currentAlias!=null?currentAlias:"", suggestion));
+                    if (fullTableName != null) { addWarningToTableTab(resultsTabbedPane, fullTableName, "Temporary Table Used", suggestion); }
                 }
             } // End loop
         } catch (Exception e) {
@@ -554,36 +610,39 @@ public class FrmQueryAnalyzer extends JFrame {
         analysisTextArea.append(suggestions.toString());
     }
 
-    /**
-     * Finds a table's specific tab and adds a warning row. (Unchanged)
-     */
+    /** Finds a table's specific tab and adds a warning row. (Corrected) */
     private void addWarningToTableTab(JTabbedPane tabPane, String tableName, String warningType, String message) {
-        for (int i = 1; i < tabPane.getTabCount(); i++) {
-            if (tableName.equalsIgnoreCase(tabPane.getTitleAt(i))) {
+        for (int i = 1; i < tabPane.getTabCount(); i++) { // Start at 1 to skip "Analysis" tab
+            String tabTitle = tabPane.getTitleAt(i);
+            // Handle potential schema prefix in tableName from parser vs. simple name in tab
+            String simpleTableName = tableName.contains(".") ? tableName.substring(tableName.lastIndexOf(".") + 1) : tableName;
+
+            if (simpleTableName.equalsIgnoreCase(tabTitle)) { // Case-insensitive compare of simple name
                 try {
                     JScrollPane scrollPane = (JScrollPane) tabPane.getComponentAt(i);
                     JTable table = (JTable) scrollPane.getViewport().getView();
                     DefaultTableModel model = (DefaultTableModel) table.getModel();
                     boolean exists = false;
+                    // Check if a similar warning already exists at the top
                     if (model.getRowCount() > 0 && "--- WARNING ---".equals(model.getValueAt(0, 0)) && warningType.equals(model.getValueAt(0, 1)) ){
                          exists = true;
                     }
                     if (!exists) {
                         model.insertRow(0, new Object[]{"--- WARNING ---", warningType, message});
-                        model.insertRow(1, new Object[]{"", "", ""});
+                        model.insertRow(1, new Object[]{"", "", ""}); // Spacer
                         tabPane.setSelectedIndex(i);
                     }
                 } catch (Exception e) {
-                    System.err.println("Error adding warning to tab '" + tableName + "': " + e.getMessage());
+                    System.err.println("Error adding warning to tab '" + tableName + "' (Title: " + tabTitle + "): " + e.getMessage());
                     e.printStackTrace();
                 }
-                return;
+                return; // Found tab
             }
         }
-         System.err.println("Warning: Could not find tab for table '" + tableName + "' to add warning.");
+         System.err.println("Warning: Could not find tab matching table '" + tableName + "' to add warning.");
     }
 
-    // --- Helper Utilities (Unchanged except getLongValue robustness) ---
+    // --- Helper Utilities ---
     private int findColumn(DefaultTableModel model, String name) {
         if (name == null || model == null) return -1;
         for (int i = 0; i < model.getColumnCount(); i++) {
@@ -610,18 +669,17 @@ public class FrmQueryAnalyzer extends JFrame {
             }
             return Long.parseLong(strValue);
         } catch (NumberFormatException e) {
-            System.err.println("Could not parse long from value: " + strValue);
+            System.err.println("Could not parse long from value: '" + strValue + "'");
             return 0;
         }
     }
 
-    /**
-     * Determines EDbVendor based on JDBC URL prefix. (Unchanged)
-     */
+    /** Determines EDbVendor based on JDBC URL prefix. (Unchanged) */
      private EDbVendor determineDbVendor(String jdbcUrl) {
          if (jdbcUrl == null) return EDbVendor.dbvansi;
          String urlLower = jdbcUrl.toLowerCase();
-         if (urlLower.startsWith("jdbc:mysql:") || urlLower.startsWith("jdbc:mariadb:") ) return EDbVendor.dbvmysql;
+         if (urlLower.startsWith("jdbc:mysql:")) return EDbVendor.dbvmysql;
+         if (urlLower.startsWith("jdbc:mariadb:")) return EDbVendor.dbvmysql;
          if (urlLower.startsWith("jdbc:postgresql:")) return EDbVendor.dbvpostgresql;
          if (urlLower.startsWith("jdbc:oracle:")) return EDbVendor.dbvoracle;
          if (urlLower.startsWith("jdbc:sqlserver:")) return EDbVendor.dbvmssql;
@@ -629,13 +687,15 @@ public class FrmQueryAnalyzer extends JFrame {
      }
 
     /**
-     * Main method to run the application. (Unchanged)
+     * Main method to run the application.
      */
     public static void main(String[] args) {
         try {
+            // Apply FlatLaf look and feel
             FlatIntelliJLaf.setup();
         } catch (Exception e) {
             e.printStackTrace();
+            // Fallback to system L&F if FlatLaf fails
             try { UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName()); }
             catch (Exception ex) { ex.printStackTrace(); }
         }

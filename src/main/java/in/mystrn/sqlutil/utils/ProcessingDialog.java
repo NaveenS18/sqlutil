@@ -91,7 +91,7 @@ public final class ProcessingDialog {
         // --- Style Changes ---
         dialog.setUndecorated(true);
         // Set a semi-transparent black background (150/255 alpha)
-        dialog.setBackground(new Color(0, 0, 0, 150));
+        dialog.setBackground(Color.decode("0xFFeae0d5"));
         dialog.setResizable(false);
         dialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
 
@@ -128,6 +128,8 @@ public final class ProcessingDialog {
                 spinnerComponent = new JProgressBar();
                 ((JProgressBar) spinnerComponent).setIndeterminate(true);
             }
+            
+            spinnerComponent.setBackground(Color.decode("0xFFeae0d5"));
         } catch (Exception e) {
             System.err.println("Could not load spinner.gif, falling back to JProgressBar.");
             spinnerComponent = new JProgressBar();
